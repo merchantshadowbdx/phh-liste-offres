@@ -1,28 +1,24 @@
 import streamlit as st
-from tqdm import tqdm
 import requests
 import pandas as pd
 from datetime import datetime
-from typing import List, Dict, Optional
-import time
-from openpyxl.styles import PatternFill, Font
-from openpyxl.utils import get_column_letter
-from openpyxl import load_workbook
+from typing import List, Dict
 import re
 
-
 class PiguAPIError(Exception):
+    """Exception personnalisée pour les erreurs de l'API Pigu"""
     pass
-
 
 class PiguClient:
     def __init__(self, username: str, password: str, seller_id: str):
+        """Initialise le client avec les identifiants"""
         self.username = username
         self.password = password
         self.seller_id = seller_id
         self.token = None
 
     def _login(self) -> str:
+        """Authentifie le client auprès de l'API"""
         headers = {"Content-Type": "application/json"}
         body = {"username": self.username, "password": self.password}
 
@@ -41,9 +37,10 @@ class PiguClient:
             return token
 
         except requests.RequestException as e:
-            raise PiguAPIError(f"Erreur d'authentification : {e}")
+            raise PiguAPIError(f"Erreur d'authentification : {str(e)}")
 
-    def fetch_offers(self, page_size: int = 100) -> List[Dict]:
+    def fetch_offers(self) -> List[Dict]:
+        """Récupère les offres du vendeur"""
         if not self.token:
             self.token = self._login()
 
@@ -52,117 +49,63 @@ class PiguClient:
             "Authorization": f"Pigu-mp {self.token}"
         }
 
-        params = {
-            "amount_from": "1",
-            "page_size": page_size
-        }
-
+        params = {"amount_from": "1", "page_size": 100}
         url = f"https://pmpapi.pigugroup.eu/v3/sellers/{self.seller_id}/offers"
         offers_data = []
 
-        st.write("\n🔄 Récupération des offres en cours...")
+        st.write("🔄 Récupération des offres en cours...")
         progress_bar = st.progress(0)
 
         page_count = 0
-        max_pages = 100  # Valeur arbitraire pour normaliser, ou à adapter si vous avez un max connu
+        max_pages = 100
 
-        with tqdm(total=float('inf'), desc='Progression', unit=' offres') as pbar:
-            while True:
-                try:
-                    response = requests.get(url, headers=headers, params=params, timeout=30)
-                    response.raise_for_status()
+        while True:
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=30)
+                response.raise_for_status()
 
-                    data = response.json()
-                    offers_batch = data.get("offers", [])
-                    offers_data.extend(offers_batch)
+                data = response.json()
+                offers_batch = data.get("offers", [])
+                offers_data.extend(offers_batch)
 
-                    page_count += 1
-                    progress = min(page_count / max_pages, 1.0)
-                    progress_bar.progress(progress)
+                page_count += 1
+                progress = min(page_count / max_pages, 1.0)
+                progress_bar.progress(progress)
 
-                    pbar.update(len(offers_batch))
-                    pbar.set_postfix({'Total': len(offers_data)})
+                next_url = data.get("meta", {}).get("next")
+                if not next_url:
+                    break
 
-                    next_url = data.get("meta", {}).get("next")
-                    if not next_url:
-                        break
+                url = next_url
+                # st.write(f"✨ Progression : {len(offers_data)} offres traitées")
 
-                    url = next_url
-                    time.sleep(1)  # Limiter les requêtes
-
-                except requests.RequestException as e:
-                    raise PiguAPIError(f"Erreur de récupération des offres : {e}")
+            except requests.RequestException as e:
+                raise PiguAPIError(f"Erreur de récupération des offres : {str(e)}")
 
         st.write(f"\n✅ Récupération terminée ! {len(offers_data)} offres trouvées.")
         progress_bar.progress(1.0)
         return offers_data
 
-    def save_offers_to_excel(self, filename: str):
-        st.write("\n📊 Traitement des données...")
+def main():
+    """Fonction principale de l'application"""
+    st.title("Extraction des Offres PHH")
+    st.sidebar.header("Paramètres de Connexion")
 
-        offers = self.fetch_offers()
-        df = pd.json_normalize(offers)
+    seller_id = st.sidebar.text_input("Identifiant Vendeur", value="")
+    username = st.sidebar.text_input("Nom d'utilisateur", value="")
+    password = st.sidebar.text_input("Mot de passe", type="password")
 
-        st.write("📋 Aperçu des offres récupérées :")
-        st.dataframe(df)
-
+    if st.sidebar.button("Extraire les Offres"):
         try:
-            df.to_excel(
-                filename,
-                index=False,
-                freeze_panes=(1, 0),
-                engine='openpyxl'
-            )
+            client = PiguClient(username, password, seller_id)
+            offers = client.fetch_offers()
+            df = pd.json_normalize(offers)
 
-            st.write("💼 Mise en forme du tableau...")
-            wb = load_workbook(filename=filename)
-            ws = wb.active
+            st.write("\n📋 Aperçu des offres récupérées :")
+            st.dataframe(df)  # L'icône de téléchargement CSV est automatiquement incluse
 
-            header_style = PatternFill(
-                start_color='001944',
-                end_color='001944',
-                fill_type='solid'
-            )
+        except PiguAPIError as e:
+            st.error(f"Erreur : {str(e)}")
 
-            for col_idx in range(1, ws.max_column + 1):
-                cell = ws.cell(row=1, column=col_idx)
-                cell.fill = header_style
-                cell.font = Font(color='FFFFFF')
-
-                ws.row_dimensions[1].height = 25
-                column_letter = get_column_letter(col_idx)
-                column_width = max(len(str(cell.value)) + 2, 15)
-                ws.column_dimensions[column_letter].width = column_width
-
-            wb.save(filename)
-            st.success("✨ Sauvegarde terminée avec succès !")
-
-        except Exception as e:
-            st.error(f"Erreur lors de la sauvegarde Excel : {str(e)}")
-            raise PiguAPIError(f"Erreur lors de la sauvegarde Excel : {str(e)}")
-
-
-# Configuration de l'interface Streamlit
-st.title("Extraction des Offres PHH")
-st.sidebar.header("Paramètres de Connexion")
-
-# Champs de saisie pour les informations d'identification
-seller_id = st.sidebar.text_input("Identifiant Vendeur", value="")
-username = st.sidebar.text_input("Nom d'utilisateur", value="")
-password = st.sidebar.text_input("Mot de passe", type="password")
-
-# Bouton de déclenchement
-if st.sidebar.button("Extraire les Offres"):
-    try:
-        client = PiguClient(username, password, seller_id)
-        now = datetime.now()
-        date_time = now.strftime('%Y-%m-%d_%H-%M')
-
-        match = re.search(r'\d+', username)
-        bzp_seller_id = match.group()
-
-        filename = f"PHH_Offres_{bzp_seller_id}_{date_time}.xlsx"
-        client.save_offers_to_excel(filename)
-
-    except PiguAPIError as e:
-        st.error(f"Erreur : {str(e)}")
+if __name__ == "__main__":
+    main()
